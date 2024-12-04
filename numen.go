@@ -74,6 +74,24 @@ type PToken struct {
 	Value any
 }
 
+func (token PToken) String() (result string) {
+	if token.Type == P_STACK {
+		result += fmt.Sprintf("<%v (", token.Type)
+		for ix, tok := range (token.Value).([]PToken) {
+			if ix > 0 {
+				result += " "
+			}
+			result += fmt.Sprintf("%v", tok)
+		}
+		result += ")>"
+	} else if token.Type == P_STRING {
+		result = fmt.Sprintf("<%v \"%v\">", token.Type, token.Value)
+	} else {
+		result = fmt.Sprintf("<%v %v>", token.Type, token.Value)
+	}
+	return result
+}
+
 type IStack []PToken
 
 type IScope struct {
@@ -97,8 +115,7 @@ type BuiltinFunction struct {
 
 var globalScope = IScope{}
 
-func accessScopeObject(custom_scope *IScope, object_name string) any {
-	var result any
+func accessScopeObject(custom_scope *IScope, object_name string) (result any) {
 	globalScope.Mut.RLock()
 	result = globalScope.Scope[object_name]
 	globalScope.Mut.RUnlock()
@@ -109,27 +126,43 @@ func accessScopeObject(custom_scope *IScope, object_name string) any {
 	result = custom_scope.Scope[object_name]
 	globalScope.Mut.RUnlock()
 	if result != nil {
-		return result
+		fmt.Printf("[ACCS] No %v in scope!\n", object_name)
 	}
-	fmt.Printf("[ACCS] No %v in scope!\n", object_name)
-	panic("No value in scope") // maybe return nil?
+	return result
+	//panic("No value in scope")
 }
 
 func parser(code string, interp_chan chan PToken, wg *sync.WaitGroup) {
 	defer wg.Done()
 	var current_state = PS_PARSING
 	var word []rune
+	// how deep is the parser
+	var block_deepness = 0
+	var stack_deepness = 0
 	// checks for fast parsing
 	var has_digit = false
 	var has_dot = false
-	//var has_negative_sign = false
-	//var has_letter = false
 	reset_all := func() {
 		has_digit = false
 		has_dot = false
-		//has_letter = false
 		word = []rune{}
 		current_state = PS_PARSING
+		block_deepness = 0
+		stack_deepness = 0
+	}
+	append_fast := func(char rune) {
+		if unicode.IsSpace(char) {
+			return
+		}
+		//if unicode.IsLetter(char) {
+		//	has_letter = true
+		//} else
+		if unicode.IsDigit(char) {
+			has_digit = true
+		} else if char == '.' {
+			has_dot = true
+		}
+		word = append(word, char)
 	}
 	for ix, char := range code {
 		if current_state == PS_PARSING {
@@ -138,10 +171,13 @@ func parser(code string, interp_chan chan PToken, wg *sync.WaitGroup) {
 			var parse_err error
 			var end_of_code = false
 			if ix == len(code)-1 {
-				word = append(word, char)
+				append_fast(char)
 				end_of_code = true
 			}
 			if unicode.IsSpace(char) || end_of_code {
+				if len(word) == 0 {
+					continue
+				}
 				if has_digit {
 					if has_dot {
 						token_value, parse_err = strconv.ParseFloat(string(word), 64)
@@ -198,78 +234,112 @@ func parser(code string, interp_chan chan PToken, wg *sync.WaitGroup) {
 				reset_all()
 			} else if char == '{' {
 				current_state = PS_BLOCK
+				block_deepness = 1
 			} else if char == '(' {
 				current_state = PS_PROCEDURE
+				stack_deepness = 1
 			} else if char == '"' {
 				current_state = PS_STRING
 			} else {
-				//if unicode.IsLetter(char) {
-				//	has_letter = true
-				//} else
-				if unicode.IsDigit(char) {
-					has_digit = true
-				} else if char == '.' {
-					has_dot = true
-				}
-				word = append(word, char)
+				append_fast(char)
 			}
 		} else if current_state == PS_STRING {
 			if char == '"' {
-				// build a token
-				// send token
-				interp_chan <- PToken{
-					Value: string(word),
-					Type:  P_STRING,
+				if word[len(word)-1] == '\\' {
+					word[len(word)-1] = char // char = '"'
+				} else {
+					// build a token
+					// send token
+					interp_chan <- PToken{
+						Value: string(word),
+						Type:  P_STRING,
+					}
+					// clear word
+					reset_all()
 				}
-				// clear word
-				reset_all()
 			} else {
 				word = append(word, char)
 			}
 		} else if current_state == PS_PROCEDURE {
 			if char == ')' {
-				// build a token
-				// send token
-				interp_chan <- PToken{
-					Value: string(word),
-					Type:  P_STACK,
+				if stack_deepness > 1 {
+					stack_deepness -= 1
+					word = append(word, char)
+				} else {
+					// build a token
+					// send token
+					test := parser_collect(string(word))
+					interp_chan <- PToken{
+						Value: test,
+						Type:  P_STACK,
+					}
+					// clear word
+					reset_all()
 				}
-				// clear word
-				reset_all()
 			} else {
+				if char == '(' {
+					stack_deepness += 1
+				}
 				word = append(word, char)
 			}
 		} else if current_state == PS_BLOCK {
 			if char == '}' {
-				// build a token
-				// send token
-				interp_chan <- PToken{
-					Value: string(word),
-					Type:  P_BLOCK,
+				if block_deepness > 1 {
+					block_deepness -= 1
+					word = append(word, char)
+				} else {
+					// build a token
+					// send token
+					interp_chan <- PToken{
+						Value: string(word),
+						Type:  P_BLOCK,
+					}
+					// clear word
+					reset_all()
 				}
-				// clear word
-				reset_all()
 			} else {
+				if char == '{' {
+					block_deepness += 1
+				}
 				word = append(word, char)
 			}
 		}
-
 	}
 	if current_state != PS_PARSING {
-		panic("[PRSR]: TODO Parsing Error")
+		if block_deepness > 0 {
+			panic("[PRSR]: Block never closed, might be a missing '}'")
+		} else if stack_deepness > 0 {
+			panic("[PRSR]: Stack never closed, might be a missing ')'")
+		} else if current_state == PS_STRING {
+			panic("[PRSR]: String never closed, might be a missing '\"'")
+		} else {
+			panic("[PRSR]: TODO Parsing Error")
+		}
 	}
 	close(interp_chan)
 }
 
-func main() {
-	code := "5 4 +"
+// returns all the parsed values instead
+func parser_collect(code string) (parsed_tokens []PToken) {
 	interp_chan := make(chan PToken)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go parser(code, interp_chan, &wg)
 	for token := range interp_chan {
-		fmt.Printf("%v '%v'\n", token.Type, token.Value)
+		parsed_tokens = append(parsed_tokens, token)
 	}
 	wg.Wait()
+	return parsed_tokens
+}
 
+func main() {
+	code := `5 4 +`
+	interp_chan := make(chan PToken)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go parser(code, interp_chan, &wg)
+	for token := range interp_chan {
+		fmt.Printf("%v\n", token)
+	}
+	wg.Wait()
 }
