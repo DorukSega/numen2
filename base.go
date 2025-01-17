@@ -110,7 +110,7 @@ func (s *IStack) PopString() string {
 	*s = (*s)[:lastIndex] // Remove the token from the stack
 
 	if !Contains(token.Type, P_STRING, P_SYMBOL) {
-		panic(fmt.Sprintf("[POP] type mismatch: expected P_STRING or P_SYMBOL, got %d", token.Type))
+		panic(fmt.Sprintf("[POP] type mismatch: expected STRING or SYMBOL, got %v", token.Type))
 	}
 
 	if v, ok := token.Value.(string); ok {

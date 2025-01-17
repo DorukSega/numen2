@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"unicode"
 )
 
@@ -146,24 +147,31 @@ func fast_pstack(values ...TypeLiterals) (stack IStack) {
 	return stack
 }
 
+type ModuleCompositeKey struct {
+	Parent  string // folder1/folder2 of folder1/folder2/file or std of std:math
+	RefName string // reference name defined by user or file
+}
+
+var modules = map[string]*IScope{
+	"sys": {
+		"write": {
+			Type: S_Function_Builtin,
+			Object: BuiltinFunction{
+				Name:           "write",
+				ParameterStack: fast_pstack(TL_STRING, TL_INT),
+				Fn: func(istack *IStack, customScope *IScope) {
+					fd := istack.PopInt()
+					text := istack.PopString()
+					syscall.Write(int(fd), []byte(text))
+				},
+			},
+			Mut: sync.RWMutex{},
+		},
+	},
+}
+
 // todo: Pop functions should propogate errors and handled here
 var globalScope = IScope{
-	"print": { // todo: print should be part of std:io
-		Type: S_Function_Builtin,
-		Object: BuiltinFunction{
-			Name:           "print",
-			ParameterStack: fast_pstack(TL_ANY),
-			Fn: func(istack *IStack, customScope *IScope) {
-				// print
-				tok := istack.PopAny()
-				if !Contains(tok.Type, P_INT, P_FLOAT, P_BOOLEAN, P_STRING) {
-					panic(fmt.Sprintf("[PRT] can't print %v type", tok.Type))
-				}
-				fmt.Println(tok.Value)
-			},
-		},
-		Mut: sync.RWMutex{},
-	},
 	"fun": {
 		Type: S_Function_Builtin,
 		Object: BuiltinFunction{
@@ -243,9 +251,11 @@ var globalScope = IScope{
 	},
 }
 
-func readScopeObject(object_name string, local_scope *IScope) (object *ScopeObject, ok bool) {
-	if gobject := globalScope[object_name]; gobject != nil {
-		return gobject, true
+func readScopeObject(object_name string, local_scope *IScope, skip_global bool) (object *ScopeObject, ok bool) {
+	if !skip_global {
+		if gobject := globalScope[object_name]; gobject != nil {
+			return gobject, true
+		}
 	}
 	if lobject := (*local_scope)[object_name]; lobject != nil {
 		return lobject, true
@@ -269,13 +279,16 @@ func parser(code string, interp_chan chan PToken, wg *sync.WaitGroup, parsed_cod
 	var has_letter = false
 	var has_dot = false
 	// for comments
-	var first_slash = false  // first /
-	var closing_star = false // closing * of */
+	var first_comment_slash = false // first /
+	var closing_star = false        // closing * of */
+	// string escapes
+	var first_string_escape = false // first \
 	reset_all := func() {
 		has_digit = false
 		has_dot = false
 		has_letter = false
-		first_slash = false
+		first_comment_slash = false
+		first_string_escape = false
 		closing_star = false
 		word = []rune{}
 		current_state = PS_PARSING
@@ -372,12 +385,12 @@ func parser(code string, interp_chan chan PToken, wg *sync.WaitGroup, parsed_cod
 				append_fast(char)
 				end_of_code = true
 			}
-			if first_slash {
+			if first_comment_slash {
 				if char == '/' {
-					first_slash = false
+					first_comment_slash = false
 					current_state = PS_LINE_COMMENT
 				} else if char == '*' {
-					first_slash = false
+					first_comment_slash = false
 					current_state = PS_BLOCK_COMMENT
 				}
 			}
@@ -404,7 +417,7 @@ func parser(code string, interp_chan chan PToken, wg *sync.WaitGroup, parsed_cod
 				}
 				current_state = PS_STRING
 			} else if char == '/' {
-				first_slash = true
+				first_comment_slash = true
 			} else {
 				append_fast(char)
 			}
@@ -421,6 +434,27 @@ func parser(code string, interp_chan chan PToken, wg *sync.WaitGroup, parsed_cod
 				reset_all()
 			}
 		} else if current_state == PS_STRING {
+			if first_string_escape {
+				last_index := len(word) - 1
+				if char == '"' {
+					first_string_escape = false
+					word[last_index] = char
+					continue
+				} else if char == 'n' {
+					first_string_escape = false
+					word[last_index] = '\n'
+					continue
+				} else if char == 't' {
+					first_string_escape = false
+					word[last_index] = '\t'
+					continue
+				} else if char == '\\' {
+					first_string_escape = false
+					continue
+				}
+				// probably invalid do nothing
+			}
+
 			if char == '"' {
 				if word[len(word)-1] == '\\' {
 					word[len(word)-1] = char // char = '"'
@@ -432,6 +466,9 @@ func parser(code string, interp_chan chan PToken, wg *sync.WaitGroup, parsed_cod
 					reset_all()
 				}
 			} else {
+				if char == '\\' {
+					first_string_escape = true
+				}
 				word = append(word, char)
 			}
 		} else if current_state == PS_PROCEDURE {
@@ -514,7 +551,28 @@ func interpret(interp_chan chan PToken, wg *sync.WaitGroup, local_scope *IScope,
 		t_value := token.Value
 		if t_type == P_SYMBOL {
 			t_parsed := t_value.(string) //todo: add custom error handling
-			if scope_object, ok := readScopeObject(t_parsed, local_scope); ok {
+			if strings.ContainsRune(t_parsed, ':') {
+				module_group := strings.Split(t_parsed, ":")
+				if len(module_group) != 2 {
+					panicf("Faulty module access %v", t_parsed)
+				}
+				module_name := module_group[0]
+				scope_obj_name := module_group[1]
+				mod_scope := modules[module_name]
+				if mod_scope == nil {
+					panicf("Module %v loaded, please load as such:\n`std:%v import`\n`parent_folder/%v import`",
+						module_name, module_name, module_name)
+				}
+				scope_object, ok := readScopeObject(scope_obj_name, mod_scope, true)
+				if !ok {
+					panicf("Module has no scope object named %v", scope_obj_name)
+				}
+				// todo: turn this to a function since it is same both places
+				if Contains(scope_object.Type, S_Function_Builtin, S_Function_Declared) {
+					run_function(scope_object, local_scope, local_stack)
+				}
+				// todo: variables
+			} else if scope_object, ok := readScopeObject(t_parsed, local_scope, false); ok {
 				if Contains(scope_object.Type, S_Function_Builtin, S_Function_Declared) {
 					run_function(scope_object, local_scope, local_stack)
 				}
@@ -615,6 +673,19 @@ func run_function(function *ScopeObject, local_scope *IScope, local_stack *IStac
 		// create a function that safe gathers them?
 		function.Mut.RUnlock()
 	}
+}
+
+func load_module(rawPathToken PToken, refName string) {
+
+	code_raw, _ := os.ReadFile("./test.nm")
+	code := string(code_raw)
+
+	interp_chan := make(chan PToken)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go parser(code, interp_chan, &wg, nil)
+	go interpret(interp_chan, &wg, &globalScope, nil)
+	wg.Wait()
 }
 
 func main() {
