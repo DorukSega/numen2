@@ -1,0 +1,29 @@
+{
+  "name": "numen",
+  "displayName": "Numen Language Support",
+  "description": "Syntax highlighting for the Numen stack-based language",
+  "version": "0.1.0",
+  "engines": {
+    "vscode": "^1.60.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "numen",
+        "aliases": ["Numen", "numen"],
+        "extensions": [".nm"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "numen",
+        "scopeName": "source.numen",
+        "path": "./syntaxes/numen.tmLanguage.json"
+      }
+    ]
+  }
+}

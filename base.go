@@ -5,6 +5,7 @@ import (
 )
 
 type IStack []PToken
+type IMemory map[string]PToken
 
 // PopAny pops the last item from the stack
 func (s *IStack) PopAny() PToken {
@@ -139,6 +140,26 @@ func (s *IStack) PopBoolean() bool {
 	}
 
 	panic("[POP] failed to cast value to bool")
+}
+
+func (s *IStack) PopMemory() IMemory {
+	if len(*s) == 0 {
+		panic("[POP] PopMemory called on an empty stack")
+	}
+
+	lastIndex := len(*s) - 1
+	token := (*s)[lastIndex]
+	*s = (*s)[:lastIndex] // Remove the token from the stack
+
+	if token.Type != P_MEMORY {
+		panic(fmt.Sprintf("[POP] type mismatch: expected P_MEMORY, got %d", token.Type))
+	}
+
+	if v, ok := token.Value.(IMemory); ok {
+		return v
+	}
+
+	panic("[POP] failed to cast value to Memory")
 }
 
 func Contains[T comparable](value T, slice ...T) bool {

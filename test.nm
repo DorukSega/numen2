@@ -1,5 +1,0 @@
-//std:io import
-
-main() {
-    "test\n" 1 sys:write
-} fun
